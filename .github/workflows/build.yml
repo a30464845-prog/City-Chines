@@ -41,16 +41,18 @@ jobs:
         run: |
           cat > performance-patch.js << 'JSEOF'
           (function(){
-            var isCapacitor = typeof window.Capacitor !== 'undefined' || /Capacitor/i.test(navigator.userAgent) || /Android/i.test(navigator.userAgent);
-            var isMobile = isCapacitor || /Android|webOS|iPhone|iPad|iPod/i.test(navigator.userAgent) || ('ontouchstart' in window) || window.innerWidth < 1024;
-            if(isMobile){
-              document.documentElement.classList.add('is-mobile');
-              document.documentElement.classList.remove('is-desktop');
-              Object.defineProperty(window,'devicePixelRatio',{value:Math.min(window.devicePixelRatio||1,1.5),writable:false});
-            }else{
-              document.documentElement.classList.add('is-desktop');
-              document.documentElement.classList.remove('is-mobile');
-            }
+            try{
+              var isCapacitor=typeof window.Capacitor!=='undefined'||/Capacitor/i.test(navigator.userAgent)||/Android/i.test(navigator.userAgent);
+              var isMobile=isCapacitor||/Android|webOS|iPhone|iPad|iPod/i.test(navigator.userAgent)||('ontouchstart' in window)||window.innerWidth<1024;
+              if(isMobile){
+                document.documentElement.classList.add('is-mobile');
+                document.documentElement.classList.remove('is-desktop');
+                Object.defineProperty(window,'devicePixelRatio',{value:Math.min(window.devicePixelRatio||1,1.5),writable:false});
+              }else{
+                document.documentElement.classList.add('is-desktop');
+                document.documentElement.classList.remove('is-mobile');
+              }
+            }catch(e){}
           })();
           JSEOF
           if ! grep -q 'viewport' index.html; then
@@ -74,41 +76,10 @@ jobs:
           rm -rf www
           cp -r dist www
           cat > capacitor.config.json << 'EOF'
-          {"appId":"com.cricket.crease","appName":"Crease Cricket","webDir":"www","android":{"backgroundColor":"#000000"},"server":{"androidScheme":"https"}}
+          {"appId":"com.cricket.crease","appName":"Crease Cricket","webDir":"www","server":{"androidScheme":"https"}}
           EOF
           npx cap add android
           npx cap sync android
-
-      - name: Enable hardware acceleration
-        working-directory: game/android
-        run: |
-          MANIFEST="app/src/main/AndroidManifest.xml"
-          if ! grep -q "hardwareAccelerated" "$MANIFEST"; then
-            sed -i 's|<application|<application android:hardwareAccelerated="true"|' "$MANIFEST"
-          fi
-          mkdir -p app/src/main/java/com/cricket/crease
-          cat > app/src/main/java/com/cricket/crease/MainActivity.java << 'JAVAEOF'
-          package com.cricket.crease;
-          import android.os.Bundle;
-          import android.view.View;
-          import android.webkit.WebView;
-          import com.getcapacitor.BridgeActivity;
-          public class MainActivity extends BridgeActivity {
-              @Override
-              public void onCreate(Bundle savedInstanceState) {
-                  super.onCreate(savedInstanceState);
-                  runOnUiThread(() -> {
-                      WebView webView = (WebView) findViewById(android.R.id.content);
-                      if (webView != null) {
-                          webView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
-                          webView.getSettings().setUseWideViewPort(true);
-                          webView.getSettings().setLoadWithOverviewMode(true);
-                      }
-                  });
-              }
-          }
-          JAVAEOF
-          sed -i 's|com.getcapacitor.BridgeActivity|com.cricket.crease.MainActivity|g' "$MANIFEST"
 
       - name: Fix Kotlin
         working-directory: game/android/app
@@ -172,10 +143,29 @@ jobs:
           "@ | Set-Content -Path "app\package.json" -Encoding UTF8
           @"
           const {app,BrowserWindow}=require('electron');
+          const http=require('http');
+          const fs=require('fs');
+          const path=require('path');
+          const mime={'.html':'text/html','.js':'text/javascript','.mjs':'text/javascript','.css':'text/css','.json':'application/json','.png':'image/png','.svg':'image/svg+xml','.mp3':'audio/mpeg','.ogg':'audio/ogg','.wasm':'application/wasm','.glb':'model/gltf-binary','.gltf':'model/gltf+json'};
+          function startServer(){
+            const dir=__dirname;
+            return new Promise(resolve=>{
+              const server=http.createServer((req,res)=>{
+                let fp=path.join(dir,req.url==='/'?'index.html':req.url);
+                if(!fp.startsWith(dir))fp=path.join(dir,'index.html');
+                fs.readFile(fp,(err,data)=>{
+                  if(err){fs.readFile(path.join(dir,'index.html'),(e2,d2)=>{res.writeHead(200,{'Content-Type':'text/html'});res.end(d2||'')})}
+                  else{const ext=path.extname(fp).toLowerCase();res.writeHead(200,{'Content-Type':mime[ext]||'application/octet-stream'});res.end(data)}
+                });
+              });
+              server.listen(0,'127.0.0.1',()=>resolve(server.address().port));
+            });
+          }
           function c(){
-            const w=new BrowserWindow({width:1280,height:720,fullscreen:true,autoHideMenuBar:true,
-            webPreferences:{nodeIntegration:false,contextIsolation:true,webgl:true,experimentalWebGL:true}});
-            w.loadFile('index.html');
+            startServer().then(port=>{
+              const w=new BrowserWindow({width:1280,height:720,fullscreen:true,autoHideMenuBar:true,webPreferences:{nodeIntegration:false,contextIsolation:true,webgl:true,experimentalWebGL:true}});
+              w.loadURL('http://127.0.0.1:'+port+'/');
+            });
           }
           app.whenReady().then(c);
           app.on('window-all-closed',()=>{if(process.platform!=='darwin')app.quit()});
