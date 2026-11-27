@@ -44,6 +44,7 @@ jobs:
           [rendering]
           renderer/rendering_method="mobile"
           renderer/rendering_method.mobile="mobile"
+          textures/vram_compression/import_etc2_astc=true
           EOF
 
       - name: Create export_presets.cfg
@@ -216,6 +217,9 @@ jobs:
           var cam_yaw := 0.0
           var cam_pitch := -0.3
 
+          var touch_forward := 0.0
+          var touch_turn := 0.0
+
           func _ready():
               car = $Car
               camera = $Camera
@@ -233,6 +237,31 @@ jobs:
                   cam_yaw -= event.relative.x * mouse_sensitivity
                   cam_pitch -= event.relative.y * mouse_sensitivity
                   cam_pitch = clampf(cam_pitch, -1.2, 0.2)
+              if event is InputEventScreenTouch:
+                  if event.pressed:
+                      _update_touch(event.position)
+                  else:
+                      touch_forward = 0.0
+                      touch_turn = 0.0
+              if event is InputEventScreenDrag:
+                  _update_touch(event.position)
+
+          func _update_touch(pos: Vector2):
+              var vp := get_viewport().get_visible_rect().size
+              if pos.x < vp.x * 0.3:
+                  if pos.y > vp.y * 0.6:
+                      touch_forward = -1.0
+                  elif pos.y < vp.y * 0.4:
+                      touch_forward = 1.0
+                  else:
+                      touch_forward = 0.0
+              elif pos.x > vp.x * 0.7:
+                  if pos.x > vp.x * 0.85:
+                      touch_turn = 1.0
+                  else:
+                      touch_turn = -1.0
+              else:
+                  touch_turn = 0.0
 
           func _physics_process(delta):
               var input_dir := Vector3.ZERO
@@ -250,6 +279,12 @@ jobs:
               if Input.is_key_pressed(KEY_SHIFT):
                   current_max = boost_speed
 
+              if OS.has_feature("mobile"):
+                  if touch_forward != 0.0:
+                      input_dir.z = -touch_forward
+                  if touch_turn != 0.0:
+                      input_dir.x = -touch_turn
+
               if input_dir != Vector3.ZERO:
                   speed = move_toward(speed, current_max, acceleration * delta)
                   if input_dir.x != 0.0:
@@ -263,38 +298,12 @@ jobs:
               car.position.y = 0.5
 
               var cam_offset := Vector3.ZERO
-              cam_offset.x = sinf(cam_yaw) * cosf(cam_pitch) * cam_distance
-              cam_offset.y = -sinf(cam_pitch) * cam_distance
-              cam_offset.z = cosf(cam_yaw) * cosf(cam_pitch) * cam_distance
+              cam_offset.x = sin(cam_yaw) * cos(cam_pitch) * cam_distance
+              cam_offset.y = -sin(cam_pitch) * cam_distance
+              cam_offset.z = cos(cam_yaw) * cos(cam_pitch) * cam_distance
               var target_cam_pos := car.position + Vector3(0, cam_height, 0) + cam_offset
               camera.position = camera.position.lerp(target_cam_pos, cam_lerp * delta)
               camera.look_at(car.position + Vector3(0, 1, 0))
-
-              if OS.has_feature("mobile"):
-                  _handle_touch(delta)
-
-          func _handle_touch(delta):
-              var touch_forward := 0.0
-              var touch_turn := 0.0
-              for touch in Input.get_pressed_touches():
-                  var t := Input.get_touch_location(touch)
-                  if t.x < 200:
-                      if t.y > 400:
-                          touch_forward = -1.0
-                      elif t.y < 300:
-                          touch_forward = 1.0
-                  elif t.x > 1000:
-                      if t.x > 1100:
-                          touch_turn = 1.0
-                      else:
-                          touch_turn = -1.0
-              if touch_forward != 0.0:
-                  speed = move_toward(speed, max_speed * touch_forward, acceleration * delta)
-                  var fwd := Vector3.ZERO.rotated(Vector3.UP, car.rotation.y)
-                  car.position += fwd * speed * delta
-              if touch_turn != 0.0:
-                  car.rotation.y += touch_turn * turn_speed * delta
-              car.position.y = 0.5
           EOF
 
       - name: Upload files as artifact
@@ -327,16 +336,16 @@ jobs:
 
       - name: Setup
         run: |
-          mkdir -v -p ~/.local/share/godot/export_templates/
-          mkdir -v -p ~/.config/
+          mkdir -p ~/.local/share/godot/export_templates/
+          mkdir -p ~/.config/
           if [ "$HOME" != "/root" ] && [ -d /root/.config/godot ]; then
             cp -r /root/.config/godot ~/.config/godot
           fi
           if [ "$HOME" != "/root" ] && [ -d "/root/.local/share/godot/export_templates/${GODOT_VERSION}.stable" ]; then
             cp -r "/root/.local/share/godot/export_templates/${GODOT_VERSION}.stable" ~/.local/share/godot/export_templates/
           fi
-          echo "Templates found:"
-          ls -la ~/.local/share/godot/export_templates/
+          echo "Templates:"
+          ls ~/.local/share/godot/export_templates/
 
       - name: Import project
         run: |
@@ -345,7 +354,7 @@ jobs:
       - name: Export Web
         run: |
           mkdir -p build/web
-          godot --headless --verbose --export-release "Web" build/web/index.html 2>&1
+          godot --headless --export-release "Web" build/web/index.html 2>&1
 
       - name: Verify Web Build
         run: |
@@ -395,21 +404,19 @@ jobs:
 
       - name: Setup
         run: |
-          mkdir -v -p ~/.local/share/godot/export_templates/
-          mkdir -v -p ~/.config/
+          mkdir -p ~/.local/share/godot/export_templates/
+          mkdir -p ~/.config/
           if [ "$HOME" != "/root" ] && [ -d /root/.config/godot ]; then
             cp -r /root/.config/godot ~/.config/godot
           fi
           if [ "$HOME" != "/root" ] && [ -d "/root/.local/share/godot/export_templates/${GODOT_VERSION}.stable" ]; then
             cp -r "/root/.local/share/godot/export_templates/${GODOT_VERSION}.stable" ~/.local/share/godot/export_templates/
           fi
-          echo "Templates found:"
-          ls -la ~/.local/share/godot/export_templates/
+          echo "Templates:"
+          ls ~/.local/share/godot/export_templates/
 
       - name: Setup Android env
         run: |
-          export ANDROID_HOME=/usr/lib/android-sdk
-          export PATH=$ANDROID_HOME/platform-tools:$PATH
           if [ ! -f /root/debug.keystore ]; then
             keytool -genkeypair -v -keystore /root/debug.keystore \
               -storepass android -alias androiddebugkey -keypass android \
@@ -434,7 +441,7 @@ jobs:
       - name: Export Android APK
         run: |
           mkdir -p build/android
-          godot --headless --verbose --export-debug "Android" build/android/citychase.apk 2>&1
+          godot --headless --export-debug "Android" build/android/citychase.apk 2>&1
 
       - name: Verify APK
         run: |
@@ -471,5 +478,4 @@ jobs:
             **City Chase Build**
             Web: ${{ needs.build-web.result }}
             Android: ${{ needs.build-android.result }}
-            URL: https://tumhara-username.github.io/city-chase/
             By: ${{ github.actor }}   
