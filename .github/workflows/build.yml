@@ -1,79 +1,200 @@
-      - name: Inject mobile performance patch
+name: Build Cricket Game (APK + EXE 32-bit)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone cricket game
+        uses: actions/checkout@v4
+        with:
+          repository: anand1296/Crease
+          ref: main
+          path: game
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Setup Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools platforms;android-34 build-tools;34.0.0
+
+      - name: Build game
+        working-directory: game
+        run: npm install && npm run build
+
+      - name: Inject mobile patch
         working-directory: game/dist
         run: |
           cat > performance-patch.js << 'JSEOF'
-          (function() {
-            // Capacitor WebView me userAgent me "Android" hota hai
-            // Plus Capacitor ka apna flag check karo
-            const isCapacitor = typeof window.Capacitor !== 'undefined' ||
-                                /Capacitor/i.test(navigator.userAgent) ||
-                                /Android/i.test(navigator.userAgent);
-            const isMobile = isCapacitor || /Android|webOS|iPhone|iPad|iPod/i.test(navigator.userAgent) ||
-                             ('ontouchstart' in window) || window.innerWidth < 1024;
-
-            if (isMobile) {
+          (function(){
+            var isCapacitor = typeof window.Capacitor !== 'undefined' || /Capacitor/i.test(navigator.userAgent) || /Android/i.test(navigator.userAgent);
+            var isMobile = isCapacitor || /Android|webOS|iPhone|iPad|iPod/i.test(navigator.userAgent) || ('ontouchstart' in window) || window.innerWidth < 1024;
+            if(isMobile){
               document.documentElement.classList.add('is-mobile');
               document.documentElement.classList.remove('is-desktop');
-              // Force mobile viewport
-              Object.defineProperty(window, 'devicePixelRatio', {
-                value: Math.min(window.devicePixelRatio || 1, 1.5),
-                writable: false
-              });
-              // Force mobile layout width
-              Object.defineProperty(window, 'innerWidth', {
-                value: Math.min(window.innerWidth || 400, 800),
-                writable: false
-              });
-            } else {
+              Object.defineProperty(window,'devicePixelRatio',{value:Math.min(window.devicePixelRatio||1,1.5),writable:false});
+            }else{
               document.documentElement.classList.add('is-desktop');
               document.documentElement.classList.remove('is-mobile');
             }
           })();
           JSEOF
-
-          # index.html me viewport meta + patch script inject karo
-          # Pehle viewport check karo
           if ! grep -q 'viewport' index.html; then
             sed -i 's|<head>|<head><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">|' index.html
           fi
-
-          # Performance patch HEAD me sabse pehle load karo
           sed -i 's|<head>|<head><script src="performance-patch.js"></script>|' index.html
-
-          # Mobile CSS override — desktop layout ko force mobile me badlo
           cat >> index.html << 'HTMLEOF'
           <style>
-            .is-mobile {
-              width: 100vw !important;
-              height: 100vh !important;
-              overflow: hidden !important;
-            }
-            .is-mobile canvas {
-              width: 100vw !important;
-              height: 100vh !important;
-              touch-action: none !important;
-            }
-            .is-mobile * {
-              -webkit-tap-highlight-color: transparent;
-              -webkit-touch-callout: none;
-            }
-            .is-mobile {
-              user-select: none;
-              -webkit-user-select: none;
-            }
-            /* Desktop-only elements hide karo mobile pe */
-            .is-mobile .desktop-only,
-            .is-mobile [data-desktop],
-            .is-mobile .keyboard-hint,
-            .is-mobile .wasd-hint {
-              display: none !important;
-            }
-            /* Mobile-only elements dikhao */
-            .is-mobile .mobile-controls,
-            .is-mobile [data-mobile],
-            .is-mobile .touch-controls {
-              display: flex !important;
-              display: block !important;
-            }
+          .is-mobile{width:100vw!important;height:100vh!important;overflow:hidden!important;user-select:none;-webkit-user-select:none}
+          .is-mobile canvas{width:100vw!important;height:100vh!important;touch-action:none!important}
+          .is-mobile *{-webkit-tap-highlight-color:transparent;-webkit-touch-callout:none}
+          .is-mobile .desktop-only,.is-mobile [data-desktop],.is-mobile .keyboard-hint,.is-mobile .wasd-hint{display:none!important}
+          .is-mobile .mobile-controls,.is-mobile [data-mobile],.is-mobile .touch-controls{display:flex!important;display:block!important}
           </style>
-          HTMLEOF   
+          HTMLEOF
+
+      - name: Setup Capacitor
+        working-directory: game
+        run: |
+          npm install @capacitor/core @capacitor/cli @capacitor/android
+          rm -rf www
+          cp -r dist www
+          cat > capacitor.config.json << 'EOF'
+          {"appId":"com.cricket.crease","appName":"Crease Cricket","webDir":"www","android":{"backgroundColor":"#000000"},"server":{"androidScheme":"https"}}
+          EOF
+          npx cap add android
+          npx cap sync android
+
+      - name: Enable hardware acceleration
+        working-directory: game/android
+        run: |
+          MANIFEST="app/src/main/AndroidManifest.xml"
+          if ! grep -q "hardwareAccelerated" "$MANIFEST"; then
+            sed -i 's|<application|<application android:hardwareAccelerated="true"|' "$MANIFEST"
+          fi
+          mkdir -p app/src/main/java/com/cricket/crease
+          cat > app/src/main/java/com/cricket/crease/MainActivity.java << 'JAVAEOF'
+          package com.cricket.crease;
+          import android.os.Bundle;
+          import android.view.View;
+          import android.webkit.WebView;
+          import com.getcapacitor.BridgeActivity;
+          public class MainActivity extends BridgeActivity {
+              @Override
+              public void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  runOnUiThread(() -> {
+                      WebView webView = (WebView) findViewById(android.R.id.content);
+                      if (webView != null) {
+                          webView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
+                          webView.getSettings().setUseWideViewPort(true);
+                          webView.getSettings().setLoadWithOverviewMode(true);
+                      }
+                  });
+              }
+          }
+          JAVAEOF
+          sed -i 's|com.getcapacitor.BridgeActivity|com.cricket.crease.MainActivity|g' "$MANIFEST"
+
+      - name: Fix Kotlin
+        working-directory: game/android/app
+        run: |
+          cat >> build.gradle << 'EOF'
+          configurations.all {
+              resolutionStrategy {
+                  force 'org.jetbrains.kotlin:kotlin-stdlib:1.8.22'
+                  force 'org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.8.22'
+                  force 'org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.8.22'
+              }
+          }
+          EOF
+
+      - name: Build APK
+        working-directory: game/android
+        run: ./gradlew assembleDebug --no-daemon
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Cricket-Android-APK
+          path: game/android/app/build/outputs/apk/debug/app-debug.apk
+
+  build-pc:
+    runs-on: windows-latest
+    steps:
+      - name: Clone cricket game
+        uses: actions/checkout@v4
+        with:
+          repository: anand1296/Crease
+          ref: main
+          path: game
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Build game
+        working-directory: game
+        run: npm install && npm run build
+
+      - name: Create Electron app
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path app
+          Copy-Item -Path "game\dist\*" -Destination "app\" -Recurse -Force
+          @"
+          {
+            "name": "crease-cricket",
+            "version": "1.0.0",
+            "description": "Crease Cricket",
+            "main": "main.js",
+            "build": {
+              "appId": "com.cricket.crease",
+              "productName": "Crease Cricket",
+              "win": { "target": "portable" }
+            }
+          }
+          "@ | Set-Content -Path "app\package.json" -Encoding UTF8
+          @"
+          const {app,BrowserWindow}=require('electron');
+          function c(){
+            const w=new BrowserWindow({width:1280,height:720,fullscreen:true,autoHideMenuBar:true,
+            webPreferences:{nodeIntegration:false,contextIsolation:true,webgl:true,experimentalWebGL:true}});
+            w.loadFile('index.html');
+          }
+          app.whenReady().then(c);
+          app.on('window-all-closed',()=>{if(process.platform!=='darwin')app.quit()});
+          "@ | Set-Content -Path "app\main.js" -Encoding UTF8
+
+      - name: Build EXE 32-bit
+        working-directory: app
+        shell: pwsh
+        run: |
+          npm install electron@43 electron-builder@24 --save-dev
+          npx electron-builder --win portable --ia32 --publish never
+
+      - name: List dist
+        working-directory: app
+        shell: pwsh
+        run: Get-ChildItem -Recurse dist/ | Select-Object FullName
+
+      - name: Upload EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: Cricket-Windows-EXE-32bit
+          path: app/dist/   
