@@ -1,4 +1,4 @@
-name: Build Cricket Game (APK + EXE)
+name: Build Cricket Game (APK + EXE 32-bit)
 
 on:
   workflow_dispatch:
@@ -39,12 +39,80 @@ jobs:
           npm install
           npm run build
 
+      - name: Inject mobile performance patch
+        working-directory: game/dist
+        run: |
+          # Performance + controls patch — Three.js mobile optimization
+          cat > performance-patch.js << 'JSEOF'
+          (function() {
+            const isMobile = /Android|webOS|iPhone|iPad|iPod/i.test(navigator.userAgent) || window.innerWidth < 1024;
+
+            // Force touch controls on mobile, keyboard on desktop
+            if (isMobile) {
+              document.documentElement.classList.add('is-mobile');
+              document.documentElement.classList.remove('is-desktop');
+            } else {
+              document.documentElement.classList.add('is-desktop');
+              document.documentElement.classList.remove('is-mobile');
+            }
+
+            // Patch Three.js renderer for mobile performance
+            const origCreateElement = document.createElement.bind(document);
+            document.createElement = function(tag, ...args) {
+              const el = origCreateElement(tag, ...args);
+              if (tag === 'canvas' && isMobile) {
+                // Cap pixel ratio, disable antialias
+                const observer = new MutationObserver(() => {
+                  const renderer = el.__three_renderer;
+                  if (renderer) {
+                    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
+                  }
+                });
+                observer.observe(el, { attributes: true });
+              }
+              return el;
+            };
+
+            // Override devicePixelRatio for Three.js
+            if (isMobile) {
+              Object.defineProperty(window, 'devicePixelRatio', {
+                value: Math.min(window.devicePixelRatio || 1, 1.5),
+                writable: false
+              });
+            }
+
+            // Disable shadows on mobile
+            if (isMobile) {
+              const origShadowMap = Object.getOwnPropertyDescriptor(THREE?.Renderer?.prototype, 'shadowMap') || null;
+            }
+
+            // Reduce shadow map size if Three.js loaded
+            const checkAndPatch = setInterval(() => {
+              const canvas = document.querySelector('canvas');
+              if (canvas && canvas.__gl) {
+                clearInterval(checkAndPatch);
+              }
+            }, 500);
+          })();
+          JSEOF
+
+          # Patch index.html to load performance script BEFORE main bundle
+          sed -i 's|<head>|<head><script src="performance-patch.js"></script>|' index.html
+
+          # Also inject inline style for mobile touch
+          cat >> index.html << 'HTMLEOF'
+          <style>
+            .is-mobile canvas { touch-action: none; }
+            .is-mobile * { -webkit-tap-highlight-color: transparent; }
+            .is-mobile { user-select: none; -webkit-user-select: none; }
+          </style>
+          HTMLEOF
+
       - name: Setup Capacitor
         working-directory: game
         run: |
           npm install @capacitor/core @capacitor/cli @capacitor/android
 
-          # dist/ ko www/ me copy karo
           rm -rf www
           cp -r dist www
 
@@ -52,12 +120,57 @@ jobs:
           {
             "appId": "com.cricket.crease",
             "appName": "Crease Cricket",
-            "webDir": "www"
+            "webDir": "www",
+            "android": {
+              "backgroundColor": "#000000"
+            }
           }
           EOF
 
           npx cap add android
           npx cap sync android
+
+      - name: Enable hardware acceleration + fix WebView
+        working-directory: game/android
+        run: |
+          # 1. AndroidManifest.xml me hardware acceleration ensure karo
+          MANIFEST="app/src/main/AndroidManifest.xml"
+          if ! grep -q "hardwareAccelerated" "$MANIFEST"; then
+            sed -i 's|<application|<application android:hardwareAccelerated="true"|' "$MANIFEST"
+          fi
+
+          # 2. Custom MainActivity — WebView ko HARDWARE layer force karo
+          mkdir -p app/src/main/java/com/cricket/crease
+          cat > app/src/main/java/com/cricket/crease/MainActivity.java << 'JAVAEOF'
+          package com.cricket.crease;
+
+          import android.os.Bundle;
+          import android.view.View;
+          import android.webkit.WebView;
+          import com.getcapacitor.BridgeActivity;
+
+          public class MainActivity extends BridgeActivity {
+              @Override
+              public void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  // Force hardware layer on the WebView
+                  runOnUiThread(() -> {
+                      WebView webView = (WebView) findViewById(com.getcapacitor.R.id.bridgeWebView);
+                      if (webView != null) {
+                          webView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
+                          webView.getSettings().setUseWideViewPort(true);
+                          webView.getSettings().setLoadWithOverviewMode(true);
+                          webView.getSettings().setMediaPlaybackRequiresUserGesture(false);
+                      }
+                  });
+              }
+          }
+          JAVAEOF
+
+          # 3. build.gradle me MainActivity reference update karo
+          if [ -f "app/src/main/AndroidManifest.xml" ]; then
+            sed -i 's|com.getcapacitor.BridgeActivity|com.cricket.crease.MainActivity|g' app/src/main/AndroidManifest.xml
+          fi
 
       - name: Fix Kotlin duplicate classes
         working-directory: game/android/app
@@ -83,7 +196,7 @@ jobs:
           name: Cricket-Android-APK
           path: game/android/app/build/outputs/apk/debug/app-debug.apk
 
-  # ==================== WINDOWS EXE ====================
+  # ==================== WINDOWS EXE (32-BIT) ====================
   build-pc:
     runs-on: windows-latest
     steps:
@@ -119,7 +232,10 @@ jobs:
             "build": {
               "appId": "com.cricket.crease",
               "productName": "Crease Cricket",
-              "win": { "target": "portable" }
+              "win": {
+                "target": "portable",
+                "arch": ["ia32"]
+              }
             }
           }
           '@ | Set-Content -Path "app\package.json" -Encoding UTF8
@@ -132,20 +248,28 @@ jobs:
               height: 720,
               fullscreen: true,
               autoHideMenuBar: true,
-              webPreferences: { nodeIntegration: false, contextIsolation: true }
+              webPreferences: {
+                nodeIntegration: false,
+                contextIsolation: true,
+                webgl: true,
+                experimentalWebGL: true
+              }
             });
             win.loadFile('index.html');
+            // Hide cursor during gameplay
+            win.on('enter-html-full-screen', () => win.setMouseCursor('none'));
+            win.on('leave-html-full-screen', () => win.setMouseCursor('default'));
           }
           app.whenReady().then(createWindow);
           app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
           '@ | Set-Content -Path "app\main.js" -Encoding UTF8
 
-      - name: Install and Build EXE
+      - name: Install and Build EXE (32-bit)
         working-directory: app
         shell: pwsh
         run: |
-          npm install electron@28 electron-builder@24 --save-dev
-          npx electron-builder --win portable --publish never
+          npm install electron@43 electron-builder@24 --save-dev
+          npx electron-builder --win portable --ia32 --publish never
 
       - name: List dist (debug)
         working-directory: app
@@ -155,5 +279,5 @@ jobs:
       - name: Upload EXE
         uses: actions/upload-artifact@v4
         with:
-          name: Cricket-Windows-EXE
+          name: Cricket-Windows-EXE-32bit
           path: app/dist/   
